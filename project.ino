@@ -1,3 +1,4 @@
+#include <IRremote.h>
 #include "Motor.h"
 #include <Servo.h>
 #include <AccelStepper.h>  // AccelStepper is already included via Motor.h, but included here for clarity if Motor.h is not visible.
@@ -94,9 +95,6 @@ void setup() {
 
   leftMotor.setAcceleration(Motor::DEFAULT_ACCEL);
   rightMotor.setAcceleration(Motor::DEFAULT_ACCEL);
-
-  Serial.println("Maze Navigation Robot Initialized.");
-  delay(1000);
 }
 
 void loop() {
@@ -120,10 +118,6 @@ void moveForwardInPlace() {
   leftMotor.forward(DRIVE_SPEED, MOVE_FORWARD_SCALE);
   rightMotor.forward(DRIVE_SPEED, MOVE_FORWARD_SCALE);
 
-  Serial.print("Moving Forward (Scale: ");
-  Serial.print(MOVE_FORWARD_SCALE);
-  Serial.println(")");
-
   state = CarState::MOVING_FORWARD;
 }
 
@@ -132,8 +126,6 @@ void turnLeft90() {
 
   leftMotor.reverse(DRIVE_SPEED, TURN_SCALE);
   rightMotor.forward(DRIVE_SPEED, TURN_SCALE);
-
-  Serial.println("Turning Left 90 degrees.");
 
   state = CarState::TURNING_LEFT;
 
@@ -145,8 +137,6 @@ void turnRight90() {
 
   leftMotor.forward(DRIVE_SPEED, TURN_SCALE);
   rightMotor.reverse(DRIVE_SPEED, TURN_SCALE);
-
-  Serial.println("Turning Right 90 degrees.");
 
   state = CarState::TURNING_RIGHT;
 
@@ -160,12 +150,6 @@ long scanDistance(int angle) {
   delay(300);
 
   long dist = sensor.centimeters();
-
-  Serial.print("Scan @ ");
-  Serial.print(angle);
-  Serial.print(" deg: ");
-  Serial.print(dist);
-  Serial.println(" cm");
 
   return dist;
 }
@@ -184,7 +168,6 @@ void runStateMachine() {
     }
 
     state = CarState::DECIDING_TURN;
-    Serial.println("Transition: DECIDING_TURN");
   }
 
 
@@ -194,12 +177,7 @@ void runStateMachine() {
       {
 
         // Stop and center the servo for the forward check
-        servo.write(SERVO_CENTER);
-        delay(200);
-
-        long frontDist = sensor.centimeters();
-        Serial.print("FRONT Dist: ");
-        Serial.println(frontDist);
+        long frontDist = scanDistance(SERVO_Center);
 
         // Prioritizes moving forward if possible
         if (frontDist > OBSTACLE_THRESHOLD_CM) {
@@ -207,7 +185,7 @@ void runStateMachine() {
           lastMoveCompleteTime = millis();
 
         } else {
-
+        
           long rightDist = scanDistance(SERVO_RIGHT);
 
           if (rightDist > OBSTACLE_THRESHOLD_CM) {
