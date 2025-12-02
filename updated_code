@@ -1,0 +1,227 @@
+#include "Motor.h"
+#include <Servo.h>
+#include <IRremote.h>
+
+// -------- PIN ASSIGNMENTS -------------
+const int SERVO_PIN   = 9;
+const int TRIG_PIN    = A4;
+const int ECHO_PIN    = A5;
+const int IR_PIN      = 3;
+
+// Motors (standard wiring: left normal, right inverted)
+Motor rightMotor(4, 5, 6, 7, false, 2.f);
+Motor leftMotor(A0, A1, A2, A3, true, 2.f);  // right inverted
+
+// --------- SETTINGS --------------------
+const int OBSTACLE_THRESHOLD_CM = 20;   // wall distance
+const float DRIVE_SPEED         = 900.f;
+
+// how far to move / turn (tune these on a good rover)
+const float MOVE_FORWARD_SCALE  = 2.f;   // bigger = longer forward segment
+const float TURN_SCALE          = .75f;  // bigger = larger turn
+
+// pause between moves, for stability
+const unsigned long DELAY_AFTER_MOVE_MS = 150;
+
+// servo angles for scanning
+const int SERVO_CENTER = 90;
+const int SERVO_LEFT   = 160;
+const int SERVO_RIGHT  = 20;
+
+// ------------ ULTRASONIC --------------
+long measureDistanceCm() {
+  // trigger pulse
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  // echo
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout
+  if (duration == 0) return 300;                  // no echo -> "far away"
+
+  long cm = (duration / 2) / 29.1;
+  if (cm > 300) cm = 300;
+  return cm;
+}
+
+// ------------ GLOBALS ------------------
+Servo servo;
+
+enum Mode {
+  MODE_AUTO,
+  MODE_PAUSED
+};
+
+Mode mode = MODE_AUTO;
+
+// simple state: are we in the middle of a move/turn?
+enum MoveState {
+  MOVE_IDLE,
+  MOVE_FORWARD,
+  MOVE_TURN_LEFT,
+  MOVE_TURN_RIGHT,
+  MOVE_BACK
+};
+
+MoveState moveState = MOVE_IDLE;
+unsigned long lastMoveFinished = 0;
+
+// ------------ HELPER: DRIVE ------------
+void startForward(float scale) {
+  leftMotor.forward(DRIVE_SPEED);
+  rightMotor.forward(DRIVE_SPEED);
+  moveState = MOVE_FORWARD;
+}
+
+void startTurnLeft(float scale) {
+  // left backward, right forward
+  leftMotor.reverse(DRIVE_SPEED);
+  rightMotor.forward(DRIVE_SPEED);
+  moveState = MOVE_TURN_LEFT;
+}
+
+void startTurnRight(float scale) {
+  // left forward, right backward
+  leftMotor.forward(DRIVE_SPEED);
+  rightMotor.reverse(DRIVE_SPEED);
+  moveState = MOVE_TURN_RIGHT;
+}
+
+void startBack(float scale) {
+  leftMotor.reverse(DRIVE_SPEED);
+  rightMotor.reverse(DRIVE_SPEED);
+  moveState = MOVE_BACK;
+}
+
+bool motorsBusy() {
+  return (leftMotor.distanceToGo() != 0 || rightMotor.distanceToGo() != 0);
+}
+
+// ------------ IR HANDLING --------------
+void handleIR() {
+  if (!IrReceiver.decode()) return;
+
+  // this remote is flaky, so we just treat ANY non-zero command as toggle
+  uint8_t cmd = IrReceiver.decodedIRData.command;
+
+  if (cmd != 0) {
+    if (mode == MODE_AUTO) {
+      mode = MODE_PAUSED;
+      leftMotor.stop();
+      rightMotor.stop();
+      moveState = MOVE_IDLE;
+      // Serial.println("IR: PAUSE -> MODE_PAUSED");
+    } else {
+      mode = MODE_AUTO;
+      // Serial.println("IR: RESUME -> MODE_AUTO");
+    }
+  }
+
+  IrReceiver.resume();
+}
+
+// ------------ SETUP --------------------
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  servo.attach(SERVO_PIN);
+  servo.write(SERVO_CENTER);
+
+  IrReceiver.begin(IR_PIN, true); // enable internal LED feedback
+
+  leftMotor.setAcceleration(Motor::DEFAULT_ACCEL);
+  rightMotor.setAcceleration(Motor::DEFAULT_ACCEL);
+
+  Serial.println("ROBOT READY (AUTO mode). Any IR button = pause/resume.");
+}
+
+// ------------ LOOP ---------------------
+void loop() {
+  // always keep stepper library running
+  leftMotor.run();
+  rightMotor.run();
+
+  // handle IR pause/resume
+ handleIR();
+
+  if (mode == MODE_PAUSED) {
+    // do nothing while paused
+    return;
+  }
+
+  // if we are currently executing a move/turn, wait until done
+  if (motorsBusy()) {
+    return;
+  }
+
+  // small delay after a move to let things settle
+  if (moveState != MOVE_IDLE) {
+    if (millis() - lastMoveFinished < DELAY_AFTER_MOVE_MS) {
+      return;
+    }
+    moveState = MOVE_IDLE;
+  }
+
+  // -------- MAIN AUTO LOGIC ----------
+  // 1. measure forward distance
+  servo.write(SERVO_CENTER);
+  delay(200);
+  long front = measureDistanceCm();
+// look right
+    servo.write(SERVO_RIGHT);
+     delay(200);
+    long rightDist = measureDistanceCm();
+
+    // look left
+    servo.write(SERVO_LEFT);
+     delay(200);
+    long leftDist = measureDistanceCm();
+
+    // center servo again
+    servo.write(SERVO_CENTER);
+  // Serial.print("Front distance: ");
+  // Serial.println(front);
+
+  if (front >= OBSTACLE_THRESHOLD_CM) {
+    // Serial.println("AUTO: Forward");
+    // startForward(MOVE_FORWARD_SCALE);
+    leftMotor.forward(1000.f);
+    rightMotor.forward(1000.f);
+  } else {
+    // Serial.println("AUTO: Obstacle ahead -> scanning...");
+
+    
+
+    // Serial.print("Scan right: ");
+    // Serial.print(rightDist);
+    // Serial.print("  left: ");
+    // Serial.println(leftDist);
+
+    if (rightDist > OBSTACLE_THRESHOLD_CM || leftDist > OBSTACLE_THRESHOLD_CM) {
+      if (rightDist >= leftDist) {
+       // Serial.println("AUTO: Turning RIGHT");
+        // startTurnRight(TURN_SCALE);
+        leftMotor.forward(1000.f);
+        rightMotor.reverse(1000.f);
+      } else {
+        //Serial.println("AUTO: Turning LEFT");
+        // startTurnLeft(TURN_SCALE);
+        leftMotor.reverse(1000.f);
+        rightMotor.forward(1000.f);
+      }
+    } else {
+      // dead end, turn around 180°
+      // Serial.println("AUTO: Dead end -> backing up");
+      // startBack(TURN_SCALE);
+      leftMotor.reverse(1000.f);
+      rightMotor.reverse(1000.f);
+    }
+  }
+
+  lastMoveFinished = millis();
+}
