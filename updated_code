@@ -10,7 +10,6 @@ const int ECHO_PIN = A5;
 const int IR_PIN = 3;
 
 // Motor setup 
-// Ratio 2.0 means 2 full rotations per standard move command
 Motor leftMotor = Motor(4, 5, 6, 7, false, 2.f);
 Motor rightMotor = Motor(A0, A1, A2, A3, true, 2.f);
 
@@ -24,13 +23,10 @@ enum Dir {
 Dir move = Dir::Stop;
 bool moving = false;
 
-// FIX 1: Lower speed. 600 is too fast for instant-start. 
-// Motors will buzz and stall. 400 is safer.
 int speed = 400; 
 
 long lastSensorCheck = 0; 
 
-// FIX 2: Move Scale variable to handle "Small Turns" vs "Big Moves"
 float moveScale = 1.0;
 
 void setup() {
@@ -40,7 +36,6 @@ void setup() {
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
 
-  // Initialize random seed
   randomSeed(analogRead(A7));
 }
 
@@ -52,7 +47,7 @@ long getDistance() {
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
   
-  // Timeout 5000 micros (~85cm) to prevent blocking
+  // Timeout 5000 micros to prevent blocking
   long duration = pulseIn(ECHO_PIN, HIGH, 5000); 
   
   if (duration == 0) return 999; 
@@ -68,7 +63,6 @@ void loop() {
     
     long distance = getDistance();
     
-    // Debug output: Check your Serial Monitor to see this!
     Serial.print("Dist: "); Serial.print(distance);
     
     Dir next;
@@ -134,19 +128,15 @@ void loop() {
   // 2. EXECUTION PHASE (Motors are running)
   // ---------------------------------------------
   if (moving) {
-    // Critical: These move the motors 1 step at a time. 
-    // Must be called as fast as possible.
     leftMotor.runSpeedToPosition();
     rightMotor.runSpeedToPosition();
 
-    // --- SAFETY CHECK (Only while moving Forward) ---
-    // If moving forward and doing a big move, keep checking sensors
+    // --- SAFETY CHECK ---
     if (move == Dir::Forward && moveScale > 0.5 && (millis() - lastSensorCheck > 50)) {
       lastSensorCheck = millis();
       
       if (getDistance() < 15) {
         Serial.println("EMERGENCY STOP!");
-        // Reset positions to stop immediately
         leftMotor.setCurrentPosition(leftMotor.currentPosition());
         rightMotor.setCurrentPosition(rightMotor.currentPosition());
         moving = false; 
