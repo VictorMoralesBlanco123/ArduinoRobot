@@ -1,216 +1,152 @@
-#include <IRremote.h>
 #include "Motor.h"
 #include <Servo.h>
-#include <AccelStepper.h>  // AccelStepper is already included via Motor.h, but included here for clarity if Motor.h is not visible.
+#include <IRremote.h>
+#include <AccelStepper.h>
 
-// --- CONFIGURATION CONSTANTS ---
-const int OBSTACLE_THRESHOLD_CM = 20;
-const float MOVE_FORWARD_SCALE = 1.25f;
-const float DRIVE_SPEED = 600.0f;
-const unsigned long DELAY_AFTER_MOVE_MS = 100;
+// -------- PIN ASSIGNMENTS -------------
+const int SERVO_PIN = 9;
+const int TRIG_PIN = A4;
+const int ECHO_PIN = A5;
+const int IR_PIN = 3;
 
-// Servo positions for scanning
-const int SERVO_CENTER = 90;
-const int SERVO_LEFT = 160;
-const int SERVO_RIGHT = 20;
+// Motor setup 
+Motor leftMotor = Motor(4, 5, 6, 7, false, 2.f);
+Motor rightMotor = Motor(A0, A1, A2, A3, true, 2.f);
 
-
-class Ultrasonic {
-public:
-  Ultrasonic(int trigPin, int echoPin) {
-    setTrigPin(trigPin);
-    setEchoPin(echoPin);
-
-    pinMode(_trigPin, OUTPUT);
-    pinMode(_echoPin, INPUT);
-
-    digitalWrite(_trigPin, LOW);
-  }
-
-  long centimeters() {
-    long duration = measureDuration();
-    if (duration == 0 || duration > 30000) return 300;
-    return (duration / 2) / 29.1;
-  }
-
-  void setTrigPin(int pin) {
-    _trigPin = pin;
-  }
-  void setEchoPin(int pin) {
-    _echoPin = pin;
-  }
-private:
-  int _trigPin;
-  int _echoPin;
-
-  long measureDuration() {
-    digitalWrite(_trigPin, LOW);
-    delayMicroseconds(2);
-
-    digitalWrite(_trigPin, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(_trigPin, LOW);
-
-    return pulseIn(_echoPin, HIGH, 30000);  // 30ms timeout for a reading
-  }
+enum Dir { 
+  Stop,
+  Forward,
+  TurnLeft,
+  TurnRight 
 };
 
-// MOTOR INITIALIZATION
-Motor leftMotor = Motor(4, 5, 6, 7, false, 2.f);
-Motor rightMotor = Motor(A0, A1, A2, A3, true, 2.f);  // Inverted right motor to ensure both move forward when given 'forward' command
+Dir move = Dir::Stop;
+bool moving = false;
 
+int speed = 400; 
 
-// PIN & OBJECT DECLARATIONS
-int servoPin = 9;
-int ultrasonicTrigger = A4;
-int ultrasonicEcho = A5;
-int IRPin = 3;
+long lastSensorCheck = 0; 
 
-Servo servo;
-Ultrasonic sensor(ultrasonicTrigger, ultrasonicEcho);
-
-enum CarState {
-  INIT_SCAN,
-  MOVING_FORWARD,
-  DECIDING_TURN,
-  TURNING_LEFT,
-  TURNING_RIGHT,
-  REVERSING
-} state = CarState::INIT_SCAN;
-
-
-void moveForwardInPlace();
-void turnLeft90();
-void turnRight90();
-long scanDistance(int angle);
-void driveMotors();
-void runStateMachine();
-
+float moveScale = 1.0;
 
 void setup() {
   Serial.begin(9600);
-  servo.attach(servoPin);
-  servo.write(SERVO_CENTER);
-  IrReceiver.begin(IRPin, true);
+  Serial.println("Robot initializing...");
+  
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
 
-  leftMotor.setAcceleration(Motor::DEFAULT_ACCEL);
-  rightMotor.setAcceleration(Motor::DEFAULT_ACCEL);
+  randomSeed(analogRead(A7));
+}
+
+// Helper function to get distance in CM
+long getDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  
+  // Timeout 5000 micros to prevent blocking
+  long duration = pulseIn(ECHO_PIN, HIGH, 5000); 
+  
+  if (duration == 0) return 999; 
+  return duration * 0.034 / 2;
 }
 
 void loop() {
-  driveMotors();
 
-  if (!leftMotor.distanceToGo() && !rightMotor.distanceToGo()) {
-    runStateMachine();
-  }
-}
+  // ---------------------------------------------
+  // 1. DECISION PHASE (Only happens when stopped)
+  // ---------------------------------------------
+  if (!moving) {
+    
+    long distance = getDistance();
+    
+    Serial.print("Dist: "); Serial.print(distance);
+    
+    Dir next;
 
-
-void driveMotors() {
-  leftMotor.run();
-  rightMotor.run();
-}
-
-
-// MOVEMENT FUNCTIONS
-
-void moveForwardInPlace() {
-  leftMotor.forward(DRIVE_SPEED, MOVE_FORWARD_SCALE);
-  rightMotor.forward(DRIVE_SPEED, MOVE_FORWARD_SCALE);
-
-  state = CarState::MOVING_FORWARD;
-}
-
-void turnLeft90() {
-  const float TURN_SCALE = 0.5f;
-
-  leftMotor.reverse(DRIVE_SPEED, TURN_SCALE);
-  rightMotor.forward(DRIVE_SPEED, TURN_SCALE);
-
-  state = CarState::TURNING_LEFT;
-
-  delay(DELAY_AFTER_MOVE_MS);
-}
-
-void turnRight90() {
-  const float TURN_SCALE = 0.5f;
-
-  leftMotor.forward(DRIVE_SPEED, TURN_SCALE);
-  rightMotor.reverse(DRIVE_SPEED, TURN_SCALE);
-
-  state = CarState::TURNING_RIGHT;
-
-  delay(DELAY_AFTER_MOVE_MS);
-}
-
-// SENSOR FUNCTIONS
-
-long scanDistance(int angle) {
-  servo.write(angle);
-  delay(300);
-
-  long dist = sensor.centimeters();
-
-  return dist;
-}
-
-
-// MAIN MAZE ALGORITHM LOGIC
-
-void runStateMachine() {
-  static unsigned long lastMoveCompleteTime = 0;
-  unsigned long currentTime = millis();
-
-  // Check if we just finished a movement/turn and need to pause for stability
-  if (state != DECIDING_TURN && state != INIT_SCAN) {
-    if (currentTime - lastMoveCompleteTime < DELAY_AFTER_MOVE_MS) {
-      return;
+    // --- OBSTACLE LOGIC (< 20cm) ---
+    if (distance < 20) {
+      Serial.println(" | OBSTACLE! Scanning...");
+      
+      // Use 0.2 scale (approx 1/5 turn) to scan instead of spin
+      moveScale = 0.2; 
+      
+      // Randomly turn Left or Right to find a path
+      next = Dir(random(2, 4)); 
+    } 
+    // --- PATH CLEAR LOGIC ---
+    else {
+      Serial.println(" | Path Clear.");
+      
+      // Use full scale (1.0) for normal movement
+      moveScale = 1.0; 
+      
+      int choice = random(0, 10);
+      if (choice < 8) next = Dir::Forward;
+      else if (choice == 8) next = Dir::TurnLeft;
+      else next = Dir::TurnRight;
     }
 
-    state = CarState::DECIDING_TURN;
+    if (next != move) delay(200);
+    move = next;
+
+    // Execute the setup for the motors
+    switch (move) {
+      case Dir::Stop:
+        leftMotor.stop();
+        rightMotor.stop();
+        moving = false; 
+        break;
+      
+      case Dir::Forward:
+        Serial.println(" -> Moving Forward");
+        leftMotor.forward(speed, moveScale);
+        rightMotor.forward(speed, moveScale);
+        moving = true;
+        break;
+      
+      case Dir::TurnLeft:
+        Serial.println(" -> Turning Left");
+        leftMotor.reverse(speed, moveScale);
+        rightMotor.forward(speed, moveScale);
+        moving = true;
+        break;
+        
+      case Dir::TurnRight:
+        Serial.println(" -> Turning Right");
+        leftMotor.forward(speed, moveScale);
+        rightMotor.reverse(speed, moveScale);
+        moving = true;
+        break;
+    }
   }
 
+  // ---------------------------------------------
+  // 2. EXECUTION PHASE (Motors are running)
+  // ---------------------------------------------
+  if (moving) {
+    leftMotor.runSpeedToPosition();
+    rightMotor.runSpeedToPosition();
 
-  switch (state) {
-    case INIT_SCAN:
-    case DECIDING_TURN:
-      {
-
-        // Stop and center the servo for the forward check
-        long frontDist = scanDistance(SERVO_Center);
-
-        // Prioritizes moving forward if possible
-        if (frontDist > OBSTACLE_THRESHOLD_CM) {
-          moveForwardInPlace();
-          lastMoveCompleteTime = millis();
-
-        } else {
-        
-          long rightDist = scanDistance(SERVO_RIGHT);
-
-          if (rightDist > OBSTACLE_THRESHOLD_CM) {
-            turnRight90();
-            lastMoveCompleteTime = millis();
-          } else {
-            long leftDist = scanDistance(SERVO_LEFT);
-
-            if (leftDist > OBSTACLE_THRESHOLD_CM) {
-              turnLeft90();
-              lastMoveCompleteTime = millis();
-            } else {
-              Serial.println("DEAD END: Turning 180 degrees.");
-              turnLeft90();
-              lastMoveCompleteTime = millis();
-            }
-          }
-        }
-        break;
+    // --- SAFETY CHECK ---
+    if (move == Dir::Forward && moveScale > 0.5 && (millis() - lastSensorCheck > 50)) {
+      lastSensorCheck = millis();
+      
+      if (getDistance() < 15) {
+        Serial.println("EMERGENCY STOP!");
+        leftMotor.setCurrentPosition(leftMotor.currentPosition());
+        rightMotor.setCurrentPosition(rightMotor.currentPosition());
+        moving = false; 
       }
+    }
 
-    case MOVING_FORWARD:
-    case TURNING_LEFT:
-    case TURNING_RIGHT:
-    case REVERSING:
-      break;
+    // Check if motors reached their target
+    if (leftMotor.distanceToGo() == 0 && rightMotor.distanceToGo() == 0) {
+      moving = false;
+      delay(100); 
+    }
   }
 }
