@@ -1,169 +1,152 @@
 #include "Motor.h"
 #include <Servo.h>
 #include <IRremote.h>
+#include <AccelStepper.h>
 
-// ------------ CONFIGURATION ------------
+// -------- PIN ASSIGNMENTS -------------
 const int SERVO_PIN = 9;
+const int TRIG_PIN = A4;
+const int ECHO_PIN = A5;
+const int IR_PIN = 3;
 
-const int TRIG_PIN  = A4;
-const int ECHO_PIN  = A5;
+// Motor setup 
+Motor leftMotor = Motor(4, 5, 6, 7, false, 2.f);
+Motor rightMotor = Motor(A0, A1, A2, A3, true, 2.f);
 
-const int IR_PIN    = 3;
+enum Dir { 
+  Stop,
+  Forward,
+  TurnLeft,
+  TurnRight 
+};
 
-const int OBSTACLE_THRESHOLD_CM = 20;   // wall distance
-const float DRIVE_SPEED         = 600.f;
+Dir move = Dir::Stop;
+bool moving = false;
 
-// Forward move and turn size (tune these on the real robot)
-const float MOVE_FORWARD_SCALE  = 2.0f;   // bigger = longer forward segment
-const float TURN_SCALE          = 0.75f;  // bigger = larger turn
+int speed = 400; 
 
-// Servo scan angles
-const int SERVO_CENTER = 90;
-const int SERVO_LEFT   = 160;
-const int SERVO_RIGHT  = 20;
+long lastSensorCheck = 0; 
 
-// ------------ OBJECTS ------------
-Motor leftMotor  = Motor(4, 5, 6, 7, false, 2.f);
-Motor rightMotor = Motor(A0, A1, A2, A3, true,  2.f);
+float moveScale = 1.0;
 
-Servo servo;
-
-// simple ultrasonic helper
-long getDistanceCM() {
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-
-  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30 ms timeout
-  if (duration == 0) return 300;
-
-  return (duration / 2) / 29.1;
-}
-
-long scanAt(int angle) {
-  servo.write(angle);
-  delay(250);
-  return getDistanceCM();
-}
-
-// robot state
-enum CarState { INIT_SCAN, MOVING, DECIDING_TURN };
-CarState state = INIT_SCAN;
-
-// global pause flag controlled by IR
-bool paused = false;
-
-// ------------ MOVEMENT HELPERS ------------
-void stopMotors() {
-  leftMotor.stop();
-  rightMotor.stop();
-}
-
-void moveForward() {
-  leftMotor.forward(DRIVE_SPEED, MOVE_FORWARD_SCALE);
-  rightMotor.forward(DRIVE_SPEED, MOVE_FORWARD_SCALE);
-  state = MOVING;
-  Serial.println("AUTO: Forward");
-}
-
-void turnLeft() {
-  leftMotor.reverse(DRIVE_SPEED, TURN_SCALE);
-  rightMotor.forward(DRIVE_SPEED, TURN_SCALE);
-  state = MOVING;
-  Serial.println("AUTO: Turn left");
-}
-
-void turnRight() {
-  leftMotor.forward(DRIVE_SPEED, TURN_SCALE);
-  rightMotor.reverse(DRIVE_SPEED, TURN_SCALE);
-  state = MOVING;
-  Serial.println("AUTO: Turn right");
-}
-
-void goBackward() {
-  leftMotor.reverse(DRIVE_SPEED, MOVE_FORWARD_SCALE * 0.7f);
-  rightMotor.reverse(DRIVE_SPEED, MOVE_FORWARD_SCALE * 0.7f);
-  state = MOVING;
-  Serial.println("AUTO: Reverse (dead end)");
-}
-
-// ------------ SETUP ------------
 void setup() {
   Serial.begin(9600);
-
+  Serial.println("Robot initializing...");
+  
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
 
-  servo.attach(SERVO_PIN);
-  servo.write(SERVO_CENTER);
-
-  IrReceiver.begin(IR_PIN, true);   // just for pause/resume
-
-  Serial.println("ROBOT READY (AUTO mode). Any IR button = pause/resume.");
+  randomSeed(analogRead(A7));
 }
 
-// ------------ MAIN AUTO LOGIC ------------
-void runAutoStateMachine() {
-  // only called when not paused and current move finished
-  servo.write(SERVO_CENTER);
-  delay(150);
-
-  long front = getDistanceCM();
-  Serial.print("Front distance: ");
-  Serial.println(front);
-
-  if (front > OBSTACLE_THRESHOLD_CM) {
-    moveForward();
-    return;
-  }
-
-  Serial.println("Obstacle ahead – scanning left/right...");
-
-  long right = scanAt(SERVO_RIGHT);
-  long left  = scanAt(SERVO_LEFT);
-  servo.write(SERVO_CENTER);
-
-  if (right > OBSTACLE_THRESHOLD_CM) {
-    turnRight();
-  } else if (left > OBSTACLE_THRESHOLD_CM) {
-    turnLeft();
-  } else {
-    // dead end
-    goBackward();
-  }
+// Helper function to get distance in CM
+long getDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  
+  // Timeout 5000 micros to prevent blocking
+  long duration = pulseIn(ECHO_PIN, HIGH, 5000); 
+  
+  if (duration == 0) return 999; 
+  return duration * 0.034 / 2;
 }
 
-// ------------ LOOP ------------
 void loop() {
-  // keep steppers moving whenever they have a target
-  leftMotor.run();
-  rightMotor.run();
 
-  // ----- IR pause/resume -----
-  if (IrReceiver.decode()) {
-    // any received IR signal toggles pause
-    paused = !paused;
+  // ---------------------------------------------
+  // 1. DECISION PHASE (Only happens when stopped)
+  // ---------------------------------------------
+  if (!moving) {
+    
+    long distance = getDistance();
+    
+    Serial.print("Dist: "); Serial.print(distance);
+    
+    Dir next;
 
-    if (paused) {
-      Serial.println("IR: PAUSE – robot stopped.");
-      stopMotors();
-    } else {
-      Serial.println("IR: RESUME – robot back to AUTO.");
-      state = INIT_SCAN;  // force a new scan
+    // --- OBSTACLE LOGIC (< 20cm) ---
+    if (distance < 20) {
+      Serial.println(" | OBSTACLE! Scanning...");
+      
+      // Use 0.2 scale (approx 1/5 turn) to scan instead of spin
+      moveScale = 0.2; 
+      
+      // Randomly turn Left or Right to find a path
+      next = Dir(random(2, 4)); 
+    } 
+    // --- PATH CLEAR LOGIC ---
+    else {
+      Serial.println(" | Path Clear.");
+      
+      // Use full scale (1.0) for normal movement
+      moveScale = 1.0; 
+      
+      int choice = random(0, 10);
+      if (choice < 8) next = Dir::Forward;
+      else if (choice == 8) next = Dir::TurnLeft;
+      else next = Dir::TurnRight;
     }
 
-    IrReceiver.resume();
+    if (next != move) delay(200);
+    move = next;
+
+    // Execute the setup for the motors
+    switch (move) {
+      case Dir::Stop:
+        leftMotor.stop();
+        rightMotor.stop();
+        moving = false; 
+        break;
+      
+      case Dir::Forward:
+        Serial.println(" -> Moving Forward");
+        leftMotor.forward(speed, moveScale);
+        rightMotor.forward(speed, moveScale);
+        moving = true;
+        break;
+      
+      case Dir::TurnLeft:
+        Serial.println(" -> Turning Left");
+        leftMotor.reverse(speed, moveScale);
+        rightMotor.forward(speed, moveScale);
+        moving = true;
+        break;
+        
+      case Dir::TurnRight:
+        Serial.println(" -> Turning Right");
+        leftMotor.forward(speed, moveScale);
+        rightMotor.reverse(speed, moveScale);
+        moving = true;
+        break;
+    }
   }
 
-  if (paused) {
-    return;  // nothing else while paused
-  }
+  // ---------------------------------------------
+  // 2. EXECUTION PHASE (Motors are running)
+  // ---------------------------------------------
+  if (moving) {
+    leftMotor.runSpeedToPosition();
+    rightMotor.runSpeedToPosition();
 
-  // If current motion finished, decide next action
-  if (leftMotor.distanceToGo() == 0 && rightMotor.distanceToGo() == 0) {
-    runAutoStateMachine();
+    // --- SAFETY CHECK ---
+    if (move == Dir::Forward && moveScale > 0.5 && (millis() - lastSensorCheck > 50)) {
+      lastSensorCheck = millis();
+      
+      if (getDistance() < 15) {
+        Serial.println("EMERGENCY STOP!");
+        leftMotor.setCurrentPosition(leftMotor.currentPosition());
+        rightMotor.setCurrentPosition(rightMotor.currentPosition());
+        moving = false; 
+      }
+    }
+
+    // Check if motors reached their target
+    if (leftMotor.distanceToGo() == 0 && rightMotor.distanceToGo() == 0) {
+      moving = false;
+      delay(100); 
+    }
   }
 }
